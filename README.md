@@ -1,0 +1,2 @@
+# SPINNs
+Separable PINNs
