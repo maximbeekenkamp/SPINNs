@@ -15,9 +15,9 @@ the accuracy of the solutions.
 
 This 2D time dependent implementation of a PINN solves a two-dimensional differential heat equation defined by: 
 
-\nu u_xx - u = e^x 
--1 < x < 1 
-u(-1) = 1, u(1) = 0 
+u(x_1, x_2) = exp (-1000[(x_1 - r_c)^2 + (x_2 - r_c)^2]) 
+
+
 """
 
 #######################################################
