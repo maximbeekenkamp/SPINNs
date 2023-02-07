@@ -17,7 +17,6 @@ This 2D time dependent implementation of a PINN solves a two-dimensional differe
 
 u(x_1, x_2) = exp (-1000[(x_1 - r_c)^2 + (x_2 - r_c)^2]) 
 
-
 """
 
 #######################################################
@@ -79,7 +78,6 @@ def predict(params, X):
         activations = tanh(jnp.dot(activations, w) + b)
     final_w, final_b = params[-1]
     logits = jnp.sum(jnp.dot(activations, final_w) + final_b)
-    print(logits.shape)
     return logits
 
 
@@ -121,16 +119,17 @@ def net_ux(params):
 
     Args:
         params (Tracer of list[DeviceArray]): List containing weights and biases.
-        X (Tracer of DeviceArray): Collocation points in the domain.
+        X (Tracer of DeviceArray): Collocation points in the domain. Can be either x1 or x2.
 
     Returns:
         (Tracer of) DeviceArray: u'(x).
     """
 
     def ux(X):
-        return grad(net_u, argnums=1)(params, X)
+        jvp(net_u, argnums=1)(params, X)
 
-    return jit(ux)
+    return jit(merge(ux, uy))
+
 
 
 def net_uxx(params):
@@ -147,7 +146,7 @@ def net_uxx(params):
 
     def uxx(X):
         u_x = net_ux(params)
-        return grad(u_x)(X)
+        return jvp(u_x)(X)
 
     return jit(uxx)
 
@@ -164,6 +163,13 @@ def funx(X):
         (Tracer of) DeviceArray: Elementwise exponent of X.
     """
     return jnp.exp(X)
+
+@jit 
+def merge(x1, x2):
+    fx1 = jnp.numpy.multiply(x1, x2)
+    return jnp.sum(fx1)
+
+    
 
 
 @jit
@@ -183,6 +189,7 @@ def loss_f(params, X, nu):
     u_xxf = net_uxx(params)
     u_xx = vmap(u_xxf, (0))(X)
     fx = vmap(funx, (0))(X)
+    merge()
     res = nu * u_xx - u - fx
     loss_f = jnp.mean((res.flatten()) ** 2)
     return loss_f
@@ -221,7 +228,6 @@ def loss(params, X, nu):
     lossb = loss_b(params)
     return lossb + lossf
 
-
 @jit
 def step(istep, opt_state, X):
     """
@@ -237,8 +243,10 @@ def step(istep, opt_state, X):
         (Tracer of) DeviceArray: Optimised network parameters.
     """
     param = get_params(opt_state)
-    g = grad(loss, argnums=0)(param, X, nu)
-    return opt_update(istep, g, opt_state)
+    g1 = grad(loss, argnums=0)(param, X, nu)
+    g2 = grad(loss, argnums=0)(param, X, nu)
+    merge(g1, g2)
+    return opt_update(istep, g, opt_state)  
 
 
 #######################################################
