@@ -3,6 +3,8 @@ from jax import grad, jit, vmap, jvp
 from jax import random
 from jax.example_libraries import optimizers
 from jax.nn import tanh
+from jax import jacfwd
+from jax import jvp
 from tqdm import trange
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,7 +17,10 @@ the accuracy of the solutions.
 
 This 2D time dependent implementation of a PINN solves a two-dimensional differential heat equation defined by: 
 
-u(x_1, x_2) = exp (-1000[(x_1 - r_c)^2 + (x_2 - r_c)^2]) 
+-Delta u() = (4*10**6 * x**2 - 2*10**6 * x + 4*10**6 * y**2 - 2*10**6 * y + 49600) * exp (-1000[(x_1 - r_c)^2 + (x_2 - r_c)^2]) 
+on [-1,1]**2
+and u() = g() on boundry
+u(x_1, x_2) = exp (-1000[(x_1 - r_c)^2 + (x_2 - r_c)^2]) = g()
 
 
 """
@@ -81,6 +86,9 @@ def predict(params, X):
     logits = jnp.sum(jnp.dot(activations, final_w) + final_b)
     print(logits.shape)
     return logits
+#does this sum work if it is outputting multiple things
+#should each input get r outputs then the first outputs for each x input will get 
+#tensor producted with the first outputs for each y input and so on then sum r tensor products?
 
 
 @jit
@@ -128,7 +136,7 @@ def net_ux(params):
     """
 
     def ux(X):
-        return grad(net_u, argnums=1)(params, X)
+        return jacfwd(net_u, argnums=1)(params, X)
 
     return jit(ux)
 
@@ -147,13 +155,35 @@ def net_uxx(params):
 
     def uxx(X):
         u_x = net_ux(params)
-        return grad(u_x)(X)
+        return jacfwd(u_x)(X)
 
     return jit(uxx)
 
+@jit
+def net_bigu(x_params, y_params, X, Y):
+
+    return jnp.sum(jnp.einsum('in,jn->nij',vmap(net_u, (None,0))(x_params, X), vmap(net_u, (None,0))(y_params, Y)), axis=0)
+#this should be the tensor product and sum along r
+
+def net_grad(x_params, y_params, num):
+
+    def grad_u(X, Y):
+        big_u = net_bigu(x_params, y_params)
+        return jacfwd(big_u, argnum=num)(X,Y)
+    
+    return jit(grad_u)
+
+def net_laplace(x_params, y_params):
+
+    def laplace_u(X, Y):
+        grad_x = net_grad(x_params, y_params, 0)
+        grad_y = net_grad(x_params, y_params, 1)
+        return jacfwd(grad_x, argnum=0)(X, Y) + jacfwd(grad_y, argnum=1)(X, Y)
+    return jit(laplace_u)
+
 
 @jit
-def funx(X):
+def funxy(X, Y):
     """
     The f(x) in the partial derivative equation.
 
@@ -163,11 +193,12 @@ def funx(X):
     Returns:
         (Tracer of) DeviceArray: Elementwise exponent of X.
     """
-    return jnp.exp(X)
+    #return jnp.exp(X)
+    return (4*10**6 * X**2 - 2*10**6 * X + 4*10**6 * Y**2 - 2*10**6 * Y + 49600) * jnp.exp(-1000[(X - 0.5)^2 + (Y - 0.5)^2])
 
 
 @jit
-def loss_f(params, X, nu):
+def loss_f(x_params, y_params, X, Y):
     """
     Calculates our residual loss.
 
@@ -179,13 +210,24 @@ def loss_f(params, X, nu):
     Returns:
         (Tracer of) DeviceArray: Residual loss.
     """
-    u = vmap(net_u, (None, 0))(params, X)
-    u_xxf = net_uxx(params)
-    u_xx = vmap(u_xxf, (0))(X)
-    fx = vmap(funx, (0))(X)
-    res = nu * u_xx - u - fx
-    loss_f = jnp.mean((res.flatten()) ** 2)
+    # u = vmap(net_u, (None, 0))(x_params, X)
+    # u_xxf = net_uxx(x_params)
+    # u_xx = vmap(u_xxf, (0))(X)
+    # v = vmap(net_u, (None, 0))(y_params, Y)
+    # v_yyf = net_uxx(y_params)
+    # v_yy = vmap(v_yyf, (0))(X)
+    # fxy = vmap(funx, (0))(X, Y)
+    # res = fxy + (u_xx)
+    # loss_f = jnp.mean((res.flatten()) ** 2)
+    # return loss_f
+    u_laplacef = net_laplace(x_params, y_params)
+    u_laplace = u_laplacef(X,Y)
+    fxy = vmap(funxy, (0,0))(X, Y)
+    res = u_laplace + fxy
+    loss_f = jnp.mean((res.flatten())**2)
     return loss_f
+    #need to figure out how the vmap works on the bigu, will it return the whole
+    #array of n * r points for each? which axes do I then tensor product and sum
 
 
 @jit
@@ -202,6 +244,7 @@ def loss_b(params):
 
     loss_b = (net_u(params, -1) - 1) ** 2 + (net_u(params, 1)) ** 2
     return loss_b
+#how many boundry points do I use? the whole boundry lol
 
 
 @jit
@@ -245,6 +288,11 @@ def step(istep, opt_state, X):
 ###              MODEL HYPERPARAMETERS              ###
 #######################################################
 
+
+# Generation of 'input data', known as collocation points.
+x = jnp.arange(-1, 1.05, 0.05)
+y = jnp.arange(-1, 1.05, 0.05)
+
 """
 Model Hyperparameter initalisation.
 
@@ -253,9 +301,9 @@ Defined hyperparameters:
     layer_sizes (list[int]): Network architecture.
     nIter (int): Number of epochs / iterations.
 """
-
+r = 10
 nu = 10 ** (-3)
-layer_sizes = [1, 20, 20, 20, 1]
+layer_sizes = [1, 20, 20, 20, r]
 nIter = 20000 + 1
 
 """
@@ -281,8 +329,6 @@ opt_state = opt_init(params)
 lb_list = []
 lf_list = []
 
-# Generation of 'input data', known as collocation points.
-x = jnp.arange(-1, 1.05, 0.05)
 
 #######################################################
 ###                  MODEL TRAINING                 ###
