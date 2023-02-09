@@ -4,11 +4,11 @@ from jax import random
 from jax.example_libraries import optimizers
 from jax.nn import tanh
 from jax import jacfwd
-from jax import jvp
 from tqdm import trange
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
+import jaxopt
 
 
 """
@@ -194,11 +194,15 @@ def funxy(X, Y):
         (Tracer of) DeviceArray: Elementwise exponent of X.
     """
     #return jnp.exp(X)
-    return (4*10**6 * X**2 - 2*10**6 * X + 4*10**6 * Y**2 - 2*10**6 * Y + 49600) * jnp.exp(-1000[(X - 0.5)^2 + (Y - 0.5)^2])
+    return (4*10**6 * X**2 - 2*10**6 * X + 4*10**6 * Y**2 - 2*10**6 * Y + 49600) * jnp.exp(-1000((X - 0.5)**2 + (Y - 0.5)**2))
+
+@jit
+def finalfunc(X,Y):
+    return jnp.exp(-1000((X - 0.5)^2 + (Y - 0.5)^2))
 
 
 @jit
-def loss_f(x_params, y_params, X, Y):
+def loss(x_params, y_params, X, Y, lam):
     """
     Calculates our residual loss.
 
@@ -224,14 +228,16 @@ def loss_f(x_params, y_params, X, Y):
     u_laplace = u_laplacef(X,Y)
     fxy = vmap(funxy, (0,0))(X, Y)
     res = u_laplace + fxy
-    loss_f = jnp.mean((res.flatten())**2)
-    return loss_f
+    lossb = loss_b(u_laplace)
+    lossf = jnp.mean((res.flatten())**2)
+    loss = lossf + lam * lossb
+    return loss, (lossf, lossb)
     #need to figure out how the vmap works on the bigu, will it return the whole
     #array of n * r points for each? which axes do I then tensor product and sum
 
 
 @jit
-def loss_b(params):
+def loss_b(values, bound, bfilter):
     """
     Calculates the boundary loss.
 
@@ -242,31 +248,17 @@ def loss_b(params):
         (Tracer of) DeviceArray: Boundary loss.
     """
 
-    loss_b = (net_u(params, -1) - 1) ** 2 + (net_u(params, 1)) ** 2
-    return loss_b
+    # loss_b = (net_u(params, -1) - 1) ** 2 + (net_u(params, 1)) ** 2
+    # return loss_b
+    return jnp.sum((values * bfilter - bound).flatten()**2)/(2*len(values[0]) + 2*len(values) - 4)
+
+
 #how many boundry points do I use? the whole boundry lol
-
-
-@jit
-def loss(params, X, nu):
-    """
-    Combines the boundary loss and residue loss into a single loss matrix.
-
-    Args:
-        params (Tracer of list[DeviceArray]): List containing weights and biases.
-        X (Tracer of DeviceArray): Collocation points in the domain.
-        nu (Tracer of float): Multiplicative constant.
-
-    Returns:
-        (Tracer of) DeviceArray: Total loss matrix.
-    """
-    lossf = loss_f(params, X, nu)
-    lossb = loss_b(params)
-    return lossb + lossf
-
+#can use a 2d array with all zeros then ones on the perimeter to get the boundry values
+#then subtract the same type of 2d array with the boundry condition
 
 @jit
-def step(istep, opt_state, X):
+def step(istep, opt_state_x, opt_state_y, X, Y, opt_state_lam):
     """
     Training step that computes gradients for network weights and applies the Adam
     optimizer to the network.
@@ -279,9 +271,71 @@ def step(istep, opt_state, X):
     Returns:
         (Tracer of) DeviceArray: Optimised network parameters.
     """
-    param = get_params(opt_state)
-    g = grad(loss, argnums=0)(param, X, nu)
-    return opt_update(istep, g, opt_state)
+    param_x = get_params_x(opt_state_x)
+    param_y = get_params_y(opt_state_y)
+    lam = get_params_lam(opt_state_lam)
+    g_x, _ = jacfwd(loss, argnums=0, has_aux=True)(param_x, param_y, X, Y)
+    g_y, _ = jacfwd(loss, argnums=1, has_aux=True)(param_x, param_y, X, Y)
+    g_lam, losses = jacfwd(loss, argnums=4, has_aux=True)(params_x, params_y, X, Y, lam)
+    return opt_update_x(istep, g_x, opt_state_x), opt_update_y(istep, g_y, opt_state_y), opt_update_lam(istep, -g_lam, opt_state_lam), losses
+
+@jit
+def step_lam(istep, params_x, params_y, X, Y, opt_state_lam):
+    """
+    Training step that computes gradients for SA-Weight for lower bound and
+    applies the Adam optimizer to the network.
+
+    Args:
+        istep (int): Current iteration step number.
+        params (Tracer of list[DeviceArray]): List containing weights and biases.
+        X (Tracer of DeviceArray): Collocation points in the domain.
+        opt_state (Tracer of OptimizerState): Optimised SA-Weight for lower bound loss.
+        ub (Tracer of DeviceArray): SA-Weight for the upper bound loss.
+
+    Returns:
+        (Tracer of) DeviceArray: Optimised SA-Weight for lower bound.
+    """
+    lam = get_params_lam(opt_state_lam)
+    g = jacfwd(loss, argnums=4, has_aux=True)(params_x, params_y, X, Y, lam)
+    return opt_update_lam(istep, -g, opt_state_lam)
+
+@jit
+def setup_boundry(X,Y):
+    bound = jnp.array([[0 for a in range(len(X))] for b in range(len(Y))])
+    bfilter = jnp.array([[0 for a in range(len(X) - 2)] for b in range(len(Y) - 2)])
+    bfilter = jnp.pad(bfilter, ((1,1), (1,1)), constant_values = 1)
+    for y in range(len(Y)):
+        bound[y][0] = finalfunc(X[0],Y[y])
+        bound[y][len(X)] = finalfunc(X[len(X)], Y[y])
+    for x in range(len(X)):
+        bound[0][x] = finalfunc(X[x],Y[0])
+        bound[len(Y)][x] = finalfunc(X[x], Y[len(Y)])
+    return bound, bfilter
+
+def loss_wrapper(params, X, Y, lam):
+    param_x, param_y = params
+    return loss(param_x, param_y, X, Y, lam) 
+
+
+def minimize_lbfgs(params_x, params_y, X, Y, lam):
+    """
+    Training step that computes gradients for network weights and applies the L-BFGS optimization
+    to the network.
+
+    Args:
+        params (jnpArray): jnpArray containing weights and biases.
+        X (Tracer of DeviceArray): Collocation points in the domain.
+        nu (Tracer of float): Multiplicative constant.
+        l_lb (Tracer of DeviceArray): SA-Weight for the lower bound loss.
+        l_ub (Tracer of DeviceArray): SA-Weight for the upper bound loss.
+        sizes (list[int]): Network architecture.
+
+    Returns:
+        (Tracer of) DeviceArray: Optimised network parameters.
+    """
+    minimizer = jaxopt.LBFGS(fun=loss_wrapper, has_aux=True)
+    opt_params = minimizer.run([params_x, params_y], X, Y, lam)
+    return opt_params.params
 
 
 #######################################################
@@ -292,6 +346,7 @@ def step(istep, opt_state, X):
 # Generation of 'input data', known as collocation points.
 x = jnp.arange(-1, 1.05, 0.05)
 y = jnp.arange(-1, 1.05, 0.05)
+
 
 """
 Model Hyperparameter initalisation.
@@ -313,7 +368,9 @@ Weights and Biases:
     params (list[DeviceArray[float]]): Initialised weights and biases.
 """
 
-params = init_network_params(layer_sizes, random.PRNGKey(0))
+params_x = init_network_params(layer_sizes, random.PRNGKey(0))
+params_y = init_network_params(layer_sizes, random.PRNGKey(0))
+lam = random.uniform(random.PRNGKey(0), shape=[1])
 
 """
 Initialising optimiser for weights/biases.
@@ -322,31 +379,39 @@ Optimiser:
     opt_state (list[DeviceArray[float]]): Initialised optimised weights and biases state.
 """
 
-opt_init, opt_update, get_params = optimizers.adam(5e-4)
-opt_state = opt_init(params)
+opt_init_x, opt_update_x, get_params_x = optimizers.adam(5e-4)
+opt_state_x = opt_init_x(params_x)
+opt_init_y, opt_update_y, get_params_y = optimizers.adam(5e-4)
+opt_state_y = opt_init_y(params_y)
+opt_init_lam, opt_update_lam, get_params_lam = optimizers.adam(5e-4)
+opt_state_lam = opt_init_lam(lam)
 
 # lists for boundary and residual loss values during training.
 lb_list = []
 lf_list = []
+lam_list = []
 
 
 #######################################################
 ###                  MODEL TRAINING                 ###
 #######################################################
-
+bound, bfilter = setup_boundry(x,y)
 pbar = trange(nIter)
 for it in pbar:
-    opt_state = step(it, opt_state, x)
+    opt_state_x, opt_state_y, opt_state_lam, losses = step(it, opt_state_x, opt_state_y, x, y)
     if it % 1 == 0:
-        params = get_params(opt_state)
-        l_b = loss_b(params)
-        l_f = loss_f(params, x, nu)
+        params_x = get_params_x(opt_state_x)
+        params_y = get_params_y(opt_state_y)
+        lam = get_params_lam(opt_state_lam)
+        l_b = losses[1]
+        l_f = losses[0]
         pbar.set_postfix({"Loss_res": l_f, "loss_bound": l_b})
         lb_list.append(l_b)
         lf_list.append(l_f)
 
 # final prediction of u(x)
-u_pred = vmap(predict, (None, 0))(params, x)
+params_min = minimize_lbfgs(params_x, params_y, x, y, lam)
+u_pred = net_bigu(params_min[0], params_min[1], x, y)
 
 #######################################################
 ###                     PLOTTING                    ###
@@ -354,16 +419,17 @@ u_pred = vmap(predict, (None, 0))(params, x)
 
 fig, axs = plt.subplots(1, 2)
 
-axs[0].plot(x, u_pred)
-axs[0].set_title("Simple PINN Proposed Solution")
+axs[0].imshow(u_pred, cmap='ocean')
+axs[0].set_title("SPINN Proposed Solution")
 axs[0].set_xlabel("x")
-axs[0].set_ylabel("Predicted u(x)")
+axs[0].set_ylabel("y")
+fig.colorbar()
 
 axs[1].plot(lb_list, label="Boundary loss")
 axs[1].plot(lf_list, label="Residue loss")
 axs[1].set_xlabel("Epoch")
 axs[1].set_ylabel("Loss")
 axs[1].legend()
-axs[1].set_title("Residue and Function Loss vs. Epochs")
+axs[1].set_title("Residue and Boundry Loss vs. Epochs")
 
 plt.show()
