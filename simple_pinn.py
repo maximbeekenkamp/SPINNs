@@ -83,8 +83,7 @@ def predict(params, X):
     for w, b in params[:-1]:
         activations = tanh(jnp.dot(activations, w) + b)
     final_w, final_b = params[-1]
-    logits = jnp.sum(jnp.dot(activations, final_w) + final_b)
-    print(logits.shape)
+    logits = jnp.dot(activations, final_w) + final_b
     return logits
 #does this sum work if it is outputting multiple things
 #should each input get r outputs then the first outputs for each x input will get 
@@ -161,24 +160,24 @@ def net_uxx(params):
 
 @jit
 def net_bigu(x_params, y_params, X, Y):
-
-    return jnp.sum(jnp.einsum('in,jn->nij',vmap(net_u, (None,0))(x_params, X), vmap(net_u, (None,0))(y_params, Y)), axis=0)
+    v_x = vmap(net_u, (None,0))(x_params, X)
+    v_y = vmap(net_u, (None,0))(y_params, Y)
+    return jnp.sum(jnp.einsum('in,jn->nij', v_x, v_y), axis=0)
 #this should be the tensor product and sum along r
 
 def net_grad(x_params, y_params, num):
 
     def grad_u(X, Y):
-        big_u = net_bigu(x_params, y_params)
-        return jacfwd(big_u, argnum=num)(X,Y)
+        return jacfwd(net_bigu, argnums=num)(x_params, y_params, X,Y)
     
     return jit(grad_u)
 
 def net_laplace(x_params, y_params):
 
     def laplace_u(X, Y):
-        grad_x = net_grad(x_params, y_params, 0)
-        grad_y = net_grad(x_params, y_params, 1)
-        return jacfwd(grad_x, argnum=0)(X, Y) + jacfwd(grad_y, argnum=1)(X, Y)
+        grad_x = net_grad(x_params, y_params, 2)
+        grad_y = net_grad(x_params, y_params, 3)
+        return jacfwd(grad_x, argnums=0)(X, Y) + jacfwd(grad_y, argnums=1)(X, Y)
     return jit(laplace_u)
 
 
@@ -194,15 +193,15 @@ def funxy(X, Y):
         (Tracer of) DeviceArray: Elementwise exponent of X.
     """
     #return jnp.exp(X)
-    return (4*10**6 * X**2 - 2*10**6 * X + 4*10**6 * Y**2 - 2*10**6 * Y + 49600) * jnp.exp(-1000((X - 0.5)**2 + (Y - 0.5)**2))
+    return (4*10**6 * X**2 - 2*10**6 * X + 4*10**6 * Y**2 - 2*10**6 * Y + 49600) * jnp.exp(-1000*((X - 0.5)**2 + (Y - 0.5)**2))
 
 @jit
 def finalfunc(X,Y):
-    return jnp.exp(-1000((X - 0.5)^2 + (Y - 0.5)^2))
+    return jnp.exp(-1000*((X - 0.5)**2 + (Y - 0.5)**2))
 
 
 @jit
-def loss(x_params, y_params, X, Y, lam):
+def loss(x_params, y_params, X, Y, lam, bound, bfilter):
     """
     Calculates our residual loss.
 
@@ -226,9 +225,9 @@ def loss(x_params, y_params, X, Y, lam):
     # return loss_f
     u_laplacef = net_laplace(x_params, y_params)
     u_laplace = u_laplacef(X,Y)
-    fxy = vmap(funxy, (0,0))(X, Y)
+    fxy = vmap(vmap(funxy, in_axes=(None,0)), in_axes=(0, None))(X, Y)
     res = u_laplace + fxy
-    lossb = loss_b(u_laplace)
+    lossb = loss_b(u_laplace, bound, bfilter)
     lossf = jnp.mean((res.flatten())**2)
     loss = lossf + lam * lossb
     return loss, (lossf, lossb)
@@ -258,7 +257,7 @@ def loss_b(values, bound, bfilter):
 #then subtract the same type of 2d array with the boundry condition
 
 @jit
-def step(istep, opt_state_x, opt_state_y, X, Y, opt_state_lam):
+def step(istep, opt_state_x, opt_state_y, X, Y, opt_state_lam, bound, bfilter):
     """
     Training step that computes gradients for network weights and applies the Adam
     optimizer to the network.
@@ -274,43 +273,22 @@ def step(istep, opt_state_x, opt_state_y, X, Y, opt_state_lam):
     param_x = get_params_x(opt_state_x)
     param_y = get_params_y(opt_state_y)
     lam = get_params_lam(opt_state_lam)
-    g_x, _ = jacfwd(loss, argnums=0, has_aux=True)(param_x, param_y, X, Y)
-    g_y, _ = jacfwd(loss, argnums=1, has_aux=True)(param_x, param_y, X, Y)
-    g_lam, losses = jacfwd(loss, argnums=4, has_aux=True)(params_x, params_y, X, Y, lam)
+    g_x, _ = jacfwd(loss, argnums=0, has_aux=True)(param_x, param_y, X, Y, lam, bound, bfilter)
+    g_y, _ = jacfwd(loss, argnums=1, has_aux=True)(param_x, param_y, X, Y, lam, bound, bfilter)
+    g_lam, losses = jacfwd(loss, argnums=4, has_aux=True)(params_x, params_y, X, Y, lam, bound, bfilter)
     return opt_update_x(istep, g_x, opt_state_x), opt_update_y(istep, g_y, opt_state_y), opt_update_lam(istep, -g_lam, opt_state_lam), losses
 
-@jit
-def step_lam(istep, params_x, params_y, X, Y, opt_state_lam):
-    """
-    Training step that computes gradients for SA-Weight for lower bound and
-    applies the Adam optimizer to the network.
-
-    Args:
-        istep (int): Current iteration step number.
-        params (Tracer of list[DeviceArray]): List containing weights and biases.
-        X (Tracer of DeviceArray): Collocation points in the domain.
-        opt_state (Tracer of OptimizerState): Optimised SA-Weight for lower bound loss.
-        ub (Tracer of DeviceArray): SA-Weight for the upper bound loss.
-
-    Returns:
-        (Tracer of) DeviceArray: Optimised SA-Weight for lower bound.
-    """
-    lam = get_params_lam(opt_state_lam)
-    g = jacfwd(loss, argnums=4, has_aux=True)(params_x, params_y, X, Y, lam)
-    return opt_update_lam(istep, -g, opt_state_lam)
-
-@jit
 def setup_boundry(X,Y):
-    bound = jnp.array([[0 for a in range(len(X))] for b in range(len(Y))])
-    bfilter = jnp.array([[0 for a in range(len(X) - 2)] for b in range(len(Y) - 2)])
-    bfilter = jnp.pad(bfilter, ((1,1), (1,1)), constant_values = 1)
+    bound = np.array([[0 for a in range(len(X))] for b in range(len(Y))])
+    bfilter = np.array([[0 for a in range(len(X) - 2)] for b in range(len(Y) - 2)])
+    bfilter = np.pad(bfilter, ((1,1), (1,1)), constant_values = 1)
     for y in range(len(Y)):
         bound[y][0] = finalfunc(X[0],Y[y])
-        bound[y][len(X)] = finalfunc(X[len(X)], Y[y])
+        bound[y][len(X)-1] = finalfunc(X[len(X)-1], Y[y])
     for x in range(len(X)):
         bound[0][x] = finalfunc(X[x],Y[0])
-        bound[len(Y)][x] = finalfunc(X[x], Y[len(Y)])
-    return bound, bfilter
+        bound[len(Y)-1][x] = finalfunc(X[x], Y[len(Y)-1])
+    return jnp.array(bound), jnp.array(bfilter)
 
 def loss_wrapper(params, X, Y, lam):
     param_x, param_y = params
@@ -398,7 +376,7 @@ lam_list = []
 bound, bfilter = setup_boundry(x,y)
 pbar = trange(nIter)
 for it in pbar:
-    opt_state_x, opt_state_y, opt_state_lam, losses = step(it, opt_state_x, opt_state_y, x, y)
+    opt_state_x, opt_state_y, opt_state_lam, losses = step(it, opt_state_x, opt_state_y, x, y, opt_state_lam, bound, bfilter)
     if it % 1 == 0:
         params_x = get_params_x(opt_state_x)
         params_y = get_params_y(opt_state_y)
