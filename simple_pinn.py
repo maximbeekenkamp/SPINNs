@@ -158,27 +158,30 @@ def net_uxx(params):
 
     return jit(uxx)
 
+#take gradients before merging
 @jit
 def net_bigu(x_params, y_params, X, Y):
-    v_x = vmap(net_u, (None,0))(x_params, X)
-    v_y = vmap(net_u, (None,0))(y_params, Y)
+    uxx = net_uxx(x_params)
+    v_x = vmap(uxx, (0))(X)
+    uyy = net_uxx(y_params)
+    v_y = vmap(uyy, (0))(Y)
     return jnp.sum(jnp.einsum('in,jn->nij', v_x, v_y), axis=0)
 #this should be the tensor product and sum along r
 
-def net_grad(x_params, y_params, num):
+# def net_grad(x_params, y_params, num):
 
-    def grad_u(X, Y):
-        return jacfwd(net_bigu, argnums=num)(x_params, y_params, X,Y)
+#     def grad_u(X, Y):
+#         return jacfwd(net_bigu, argnums=num)(x_params, y_params, X,Y)
     
-    return jit(grad_u)
+#     return jit(grad_u)
 
-def net_laplace(x_params, y_params):
+# def net_laplace(x_params, y_params):
 
-    def laplace_u(X, Y):
-        grad_x = net_grad(x_params, y_params, 2)
-        grad_y = net_grad(x_params, y_params, 3)
-        return jacfwd(grad_x, argnums=0)(X, Y) + jacfwd(grad_y, argnums=1)(X, Y)
-    return jit(laplace_u)
+#     def laplace_u(X, Y):
+#         grad_x = net_grad(x_params, y_params, 2)
+#         grad_y = net_grad(x_params, y_params, 3)
+#         return jacfwd(grad_x, argnums=0)(X, Y) + jacfwd(grad_y, argnums=1)(X, Y)
+#     return jit(laplace_u)
 
 
 @jit
@@ -223,14 +226,13 @@ def loss(x_params, y_params, X, Y, lam, bound, bfilter):
     # res = fxy + (u_xx)
     # loss_f = jnp.mean((res.flatten()) ** 2)
     # return loss_f
-    u_laplacef = net_laplace(x_params, y_params)
-    u_laplace = u_laplacef(X,Y)
+    u_laplace = net_bigu(x_params, y_params, X, Y)
     fxy = vmap(vmap(funxy, in_axes=(None,0)), in_axes=(0, None))(X, Y)
     res = u_laplace + fxy
     lossb = loss_b(u_laplace, bound, bfilter)
     lossf = jnp.mean((res.flatten())**2)
-    loss = lossf + lam * lossb
-    return loss, (lossf, lossb)
+    loss = jnp.sum(lossf + lam * lossb)
+    return (loss, (lossf, lossb))
     #need to figure out how the vmap works on the bigu, will it return the whole
     #array of n * r points for each? which axes do I then tensor product and sum
 
@@ -273,9 +275,13 @@ def step(istep, opt_state_x, opt_state_y, X, Y, opt_state_lam, bound, bfilter):
     param_x = get_params_x(opt_state_x)
     param_y = get_params_y(opt_state_y)
     lam = get_params_lam(opt_state_lam)
-    g_x, _ = jacfwd(loss, argnums=0, has_aux=True)(param_x, param_y, X, Y, lam, bound, bfilter)
-    g_y, _ = jacfwd(loss, argnums=1, has_aux=True)(param_x, param_y, X, Y, lam, bound, bfilter)
-    g_lam, losses = jacfwd(loss, argnums=4, has_aux=True)(params_x, params_y, X, Y, lam, bound, bfilter)
+    g_x = grad(loss, argnums=0, has_aux=True)(param_x, param_y, X, Y, lam, bound, bfilter)
+    g_x = g_x[0]
+    g_y = grad(loss, argnums=1, has_aux=True)(param_x, param_y, X, Y, lam, bound, bfilter)
+    g_y = g_y[0]
+    g_lam = grad(loss, argnums=4, has_aux=True)(params_x, params_y, X, Y, lam, bound, bfilter)
+    losses = g_lam[1]
+    g_lam = g_lam[0]
     return opt_update_x(istep, g_x, opt_state_x), opt_update_y(istep, g_y, opt_state_y), opt_update_lam(istep, -g_lam, opt_state_lam), losses
 
 def setup_boundry(X,Y):
@@ -383,13 +389,19 @@ for it in pbar:
         lam = get_params_lam(opt_state_lam)
         l_b = losses[1]
         l_f = losses[0]
-        pbar.set_postfix({"Loss_res": l_f, "loss_bound": l_b})
+
+        #pbar.set_postfix({"Loss_res": l_f, "loss_bound": l_b})
+        pbar.set_postfix({"Loss": loss(params_x, params_y, x, y, lam, bound, bfilter)})
         lb_list.append(l_b)
         lf_list.append(l_f)
 
 # final prediction of u(x)
-params_min = minimize_lbfgs(params_x, params_y, x, y, lam)
-u_pred = net_bigu(params_min[0], params_min[1], x, y)
+# params_min = minimize_lbfgs(params_x, params_y, x, y, lam)
+# u_pred = net_bigu(params_min[0], params_min[1], x, y)
+u_pred = net_bigu(params_x, params_y, x, y)
+
+print("lb",lb_list)
+print('lf', lf_list)
 
 #######################################################
 ###                     PLOTTING                    ###
@@ -397,11 +409,11 @@ u_pred = net_bigu(params_min[0], params_min[1], x, y)
 
 fig, axs = plt.subplots(1, 2)
 
-axs[0].imshow(u_pred, cmap='ocean')
+shw = axs[0].imshow(u_pred, cmap='ocean')
 axs[0].set_title("SPINN Proposed Solution")
 axs[0].set_xlabel("x")
 axs[0].set_ylabel("y")
-fig.colorbar()
+fig.colorbar(shw)
 
 axs[1].plot(lb_list, label="Boundary loss")
 axs[1].plot(lf_list, label="Residue loss")
