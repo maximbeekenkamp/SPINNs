@@ -328,8 +328,8 @@ def minimize_lbfgs(params_x, params_y, X, Y, lam):
 
 
 # Generation of 'input data', known as collocation points.
-x = jnp.arange(-1, 1.05, 0.05)
-y = jnp.arange(-1, 1.05, 0.05)
+x = jnp.arange(-1, 1.02, 0.02)
+y = jnp.arange(-1, 1.02, 0.02)
 
 
 """
@@ -342,8 +342,8 @@ Defined hyperparameters:
 """
 r = 10
 nu = 10 ** (-3)
-layer_sizes = [1, 20, 20, 20, r]
-nIter = 20000 + 1
+layer_sizes = [1, 20, 20, r]
+nIter = 5000 + 1
 
 """
 Initialising weights, biases.
@@ -382,16 +382,17 @@ lam_list = []
 bound, bfilter = setup_boundry(x,y)
 pbar = trange(nIter)
 for it in pbar:
-    opt_state_x, opt_state_y, opt_state_lam, losses = step(it, opt_state_x, opt_state_y, x, y, opt_state_lam, bound, bfilter)
+    opt_state_x, opt_state_y, opt_state_lam, _ = step(it, opt_state_x, opt_state_y, x, y, opt_state_lam, bound, bfilter)
     if it % 1 == 0:
         params_x = get_params_x(opt_state_x)
         params_y = get_params_y(opt_state_y)
         lam = get_params_lam(opt_state_lam)
-        l_b = losses[1]
-        l_f = losses[0]
+        loss_full, losses = loss(params_x, params_y, x, y, lam, bound, bfilter)
+        l_b = int(losses[1])
+        l_f = int(losses[0])
 
         #pbar.set_postfix({"Loss_res": l_f, "loss_bound": l_b})
-        pbar.set_postfix({"Loss": loss(params_x, params_y, x, y, lam, bound, bfilter)})
+        pbar.set_postfix({"Loss": (loss_full, losses)})
         lb_list.append(l_b)
         lf_list.append(l_f)
 
@@ -406,8 +407,7 @@ print('lf', lf_list)
 #######################################################
 ###                     PLOTTING                    ###
 #######################################################
-
-fig, axs = plt.subplots(1, 2)
+fig, axs = plt.subplots(1,2,figsize = (12,8))
 
 shw = axs[0].imshow(u_pred, cmap='ocean')
 axs[0].set_title("SPINN Proposed Solution")
@@ -420,6 +420,6 @@ axs[1].plot(lf_list, label="Residue loss")
 axs[1].set_xlabel("Epoch")
 axs[1].set_ylabel("Loss")
 axs[1].legend()
-axs[1].set_title("Residue and Boundry Loss vs. Epochs")
+axs[1].set_title("Loss vs. Epochs")
 
 plt.show()
