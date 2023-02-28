@@ -103,7 +103,7 @@ def net_u(params, X):
     x_array = jnp.array([X])
     return predict(params, x_array)
 
-@jit
+
 def hvp_fwdfwd(f, primals, tangents, return_primals=False):
     g = lambda primals: jvp(f, (primals,), tangents)[1]
     primals_out, tangents_out = jvp(g, primals, tangents)
@@ -124,7 +124,7 @@ def net_laplace(x_params, y_params, X, Y):
     v = jnp.ones(X.shape)
     u_xx = hvp_fwdfwd(lambda x: net_bigu(x_params, y_params, x, Y), (X,), (v,))
     u_yy = hvp_fwdfwd(lambda y: net_bigu(x_params, y_params, X, y), (Y,), (v,))
-    return u_xx + u_yy
+    return -(u_xx + u_yy)
 
 @jit
 def funxy(X, Y):
@@ -137,7 +137,7 @@ def funxy(X, Y):
     Returns:
         (Tracer of) DeviceArray: Elementwise exponent of X.
     """
-    return (4*10**6 * X**2 - 2*10**6 * X + 4*10**6 * Y**2 - 2*10**6 * Y + 49600) * jnp.exp(-1000*((X - 0.5)**2 + (Y - 0.5)**2))
+    return (-4*10**6 * X**2 + 4*10**6 * X - 4*10**6 * Y**2 + 4*10**6 * Y - 1.996*10**6) * jnp.exp(-1000*((X - 0.5)**2 + (Y - 0.5)**2))
 #this might be wrong :(
 
 @jit
@@ -160,10 +160,10 @@ def loss(x_params, y_params, X, Y, bound, bfilter):
     """
     u_laplace = net_laplace(x_params, y_params, X, Y)
     fxy = vmap(vmap(funxy, in_axes=(None,0)), in_axes=(0, None))(X, Y)
-    res = u_laplace + fxy
+    res = u_laplace - fxy
     lossb = loss_b(u_laplace, bound, bfilter)
     lossf = jnp.mean((res.flatten())**2)
-    loss = jnp.sum(lossf + lossb)
+    loss = jnp.sum(lossf + 2*lossb)
     return (loss, (lossf, lossb))
 
 
@@ -234,10 +234,9 @@ Defined hyperparameters:
     layer_sizes (list[int]): Network architecture.
     nIter (int): Number of epochs / iterations.
 """
-r = 64
-nu = 10 ** (-3)
-layer_sizes = [1, 64, 64, 64, r]
-nIter = 10000 + 1
+r = 20
+layer_sizes = [1, 20, 20, 20, r]
+nIter = 20000 + 1
 
 """
 Initialising weights, biases.
@@ -256,16 +255,15 @@ Optimiser:
     opt_state (list[DeviceArray[float]]): Initialised optimised weights and biases state.
 """
 
-opt_init_x, opt_update_x, get_params_x = optimizers.adam(5e-4)
+opt_init_x, opt_update_x, get_params_x = optimizers.adam(1e-3)
 opt_state_x = opt_init_x(params_x)
 
-opt_init_y, opt_update_y, get_params_y = optimizers.adam(5e-4)
+opt_init_y, opt_update_y, get_params_y = optimizers.adam(1e-3)
 opt_state_y = opt_init_y(params_y)
 
 # lists for boundary and residual loss values during training.
 lb_list = []
 lf_list = []
-
 
 #######################################################
 ###                  MODEL TRAINING                 ###
