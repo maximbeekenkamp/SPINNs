@@ -1,7 +1,7 @@
 import time
 import numpy as np
 import jax.numpy as jnp
-from jax import grad, jit, vmap
+from jax import grad, jit, vmap, jvp
 from jax import random
 from jax.example_libraries import optimizers
 from jax.nn import tanh
@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 
 
 """
-A Simple PINN is a partial derivative solver that is bound by physical laws, thus improving 
-the accuracy of the solutions. 
+A Separable PINN is a partial derivative solver that improves on a simple PINN model by leveraging forward-mode
+autodifferentiation and operating on a per-axis basis. 
 
 This 2D time dependent implementation of a PINN solves a two-dimensional differential heat equation defined by: 
 
@@ -83,93 +83,48 @@ def predict(params, X):
     final_w, final_b = params[-1]
     logits = jnp.dot(activations, final_w) + final_b
     return logits
+#does this sum work if it is outputting multiple things
+#should each input get r outputs then the first outputs for each x input will get 
+#tensor producted with the first outputs for each y input and so on then sum r tensor products?
 
 
 @jit
-def net_u(params, X, Y):
+def net_u(params, X):
     """
-    [Description]
+    Defines neural network for u(x).
 
     Args:
         params (Tracer of list[DeviceArray]): List containing weights and biases.
         X (Tracer of DeviceArray): Collocation points in the domain.
-        Y (Tracer of DeviceArray): Collocation points in the domain.
 
     Returns:
         (Tracer of) DeviceArray: u(x).
     """
-    xy_array = jnp.array([X,Y])
-    return predict(params, xy_array)
-
-@jit
-def net_u_grad(params, X, Y):
-    """
-    [Description]
-
-    Args:
-        params (Tracer of list[DeviceArray]): List containing weights and biases.
-        X (Tracer of DeviceArray): Collocation points in the domain.
-        Y (Tracer of DeviceArray): Collocation points in the domain.
-
-    Returns:
-        (Tracer of) DeviceArray: u(x).
-    """
-    x_array = jnp.array([X, Y])
-    y_pred = predict(params, x_array)
-    return y_pred[0]
+    x_array = jnp.array([X])
+    return predict(params, x_array)
 
 
-def net_f(params):
-    """
-    Defines neural network for first spatial derivative of u(x): u'(x).
-
-    Args:
-        params (Tracer of list[DeviceArray]): List containing weights and biases.
-
-    Returns:
-        (Tracer of) Tuple[DeviceArray]: u'(x), u'(y).
-    """
-
-    def ux(X,Y):
-        return grad(net_u_grad, argnums=1)(params, X, Y)
-    
-    def uy(X,Y):
-        return grad(net_u_grad, argnums=2)(params, X, Y)
-
-    return jit(ux), jit(uy)
-
-
-def net_ff(params):
-    """
-    Defines neural network for second spatial derivative of u(x): u''(x).
-
-    Args:
-        params (Tracer of list[DeviceArray]): List containing weights and biases.
-        X (Tracer of DeviceArray): Collocation points in the domain.
-
-    Returns:
-        (Tracer of) DeviceArray: u''(x).
-    """
-
-    def uxx(X, Y):
-        u_x, _ = net_f(params)
-        return grad(u_x, argnums=0)(X, Y)
-    
-    def uyy(X,Y):
-        _, u_y = net_f(params)
-        return grad(u_y, argnums=1)(X, Y)
-
-    return jit(uxx), jit(uyy)
+def hvp_fwdfwd(f, primals, tangents, return_primals=False):
+    g = lambda primals: jvp(f, (primals,), tangents)[1]
+    primals_out, tangents_out = jvp(g, primals, tangents)
+    if return_primals:
+        return primals_out, tangents_out
+    else:
+        return tangents_out
 
 #take gradients before merging
 @jit
-def net_bigu(params, X, Y):
-    u_xxf, u_yyf = net_ff(params)
-    u_xx = vmap(vmap(u_xxf, in_axes=(None, 0)), in_axes=(0, None))(X, Y)
-    u_yy = vmap(vmap(u_yyf, in_axes=(None, 0)), in_axes=(0, None))(X, Y)
-    laplace = u_xx + u_yy
-    return laplace
+def net_bigu(x_params, y_params, X, Y):
+    u_x = vmap(net_u, (None, 0))(x_params, X)
+    u_y = vmap(net_u, (None, 0))(y_params, Y)
+    return jnp.sum(jnp.einsum('in,jn->nij', u_x, u_y), axis=0)
 
+@jit
+def net_laplace(x_params, y_params, X, Y):
+    v = jnp.ones(X.shape)
+    u_xx = hvp_fwdfwd(lambda x: net_bigu(x_params, y_params, x, Y), (X,), (v,))
+    u_yy = hvp_fwdfwd(lambda y: net_bigu(x_params, y_params, X, y), (Y,), (v,))
+    return -(u_xx + u_yy)
 
 @jit
 def funxy(X, Y):
@@ -182,7 +137,8 @@ def funxy(X, Y):
     Returns:
         (Tracer of) DeviceArray: Elementwise exponent of X.
     """
-    return (4*10**6 * X**2 - 2*10**6 * X + 4*10**6 * Y**2 - 2*10**6 * Y + 49600) * jnp.exp(-1000*((X - 0.5)**2 + (Y - 0.5)**2))
+    return (4*10**6 * X**2 + -4*10**6 * X + 4*10**6 * Y**2 - 4*10**6 * Y + 1.996*10**6) * jnp.exp(-1000*((X**2 - X + Y**2 - Y + 0.5)))
+#this might be wrong :(
 
 @jit
 def finalfunc(X,Y):
@@ -190,7 +146,7 @@ def finalfunc(X,Y):
 
 
 @jit
-def loss(params, X, Y, bound, bfilter):
+def loss(x_params, y_params, X, Y, bound, bfilter):
     """
     Calculates our residual loss.
 
@@ -202,12 +158,12 @@ def loss(params, X, Y, bound, bfilter):
     Returns:
         (Tracer of) DeviceArray: Residual loss.
     """
-    laplace = net_bigu(params, X, Y)
+    u_laplace = net_laplace(x_params, y_params, X, Y)
     fxy = vmap(vmap(funxy, in_axes=(None,0)), in_axes=(0, None))(X, Y)
-    res = laplace+ fxy
-    lossb = loss_b(laplace, bound, bfilter)
+    res = u_laplace - fxy
+    lossb = loss_b(u_laplace, bound, bfilter)
     lossf = jnp.mean((res.flatten())**2)
-    loss = jnp.sum(lossf + lossb)
+    loss = jnp.sum(lossf + 2*lossb)
     return (loss, (lossf, lossb))
 
 
@@ -226,7 +182,7 @@ def loss_b(values, bound, bfilter):
     return jnp.sum((values * bfilter - bound).flatten()**2)/(2*len(values[0]) + 2*len(values) - 4)
 
 @jit
-def step(istep, opt_state, X, Y, bound, bfilter):
+def step(istep, opt_state_x, opt_state_y, X, Y, bound, bfilter):
     """
     Training step that computes gradients for network weights and applies the Adam
     optimizer to the network.
@@ -239,13 +195,17 @@ def step(istep, opt_state, X, Y, bound, bfilter):
     Returns:
         (Tracer of) DeviceArray: Optimised network parameters.
     """
-    params = get_params(opt_state)
-    g = grad(loss, argnums=0, has_aux=True)(params, X, Y, bound, bfilter)
-    return opt_update(istep, g[0], opt_state)
+    param_x = get_params_x(opt_state_x)
+    param_y = get_params_y(opt_state_y)
+    g_x = grad(loss, argnums=0, has_aux=True)(param_x, param_y, X, Y, bound, bfilter)
+    g_x = g_x[0]
+    g_y = grad(loss, argnums=1, has_aux=True)(param_x, param_y, X, Y, bound, bfilter)
+    g_y = g_y[0]
+    return opt_update_x(istep, g_x, opt_state_x), opt_update_y(istep, g_y, opt_state_y)
 
 def setup_boundry(X,Y):
-    bound = np.array([[0 for a in range(len(X))] for b in range(len(Y))])
-    bfilter = np.array([[0 for a in range(len(X) - 2)] for b in range(len(Y) - 2)])
+    bound = np.array([[0 for _ in range(len(X))] for _ in range(len(Y))])
+    bfilter = np.array([[0 for _ in range(len(X) - 2)] for _ in range(len(Y) - 2)])
     bfilter = np.pad(bfilter, ((1,1), (1,1)), constant_values = 1)
     for y in range(len(Y)):
         bound[y][0] = finalfunc(X[0],Y[y])
@@ -262,8 +222,8 @@ def setup_boundry(X,Y):
 
 
 # Generation of 'input data', known as collocation points.
-x = jnp.arange(-1, 1.02, 0.02)
-y = jnp.arange(-1, 1.02, 0.02)
+x = jnp.linspace(-1, 1, 100)
+y = jnp.linspace(-1, 1, 100)
 
 
 """
@@ -274,8 +234,8 @@ Defined hyperparameters:
     layer_sizes (list[int]): Network architecture.
     nIter (int): Number of epochs / iterations.
 """
-nu = 10 ** (-3)
-layer_sizes = [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
+r = 20
+layer_sizes = [1, 20, 20, 20, r]
 nIter = 20000 + 1
 
 """
@@ -285,8 +245,8 @@ Weights and Biases:
     params (list[DeviceArray[float]]): Initialised weights and biases.
 """
 
-params = init_network_params(layer_sizes, random.PRNGKey(0))
-lam = random.uniform(random.PRNGKey(0), shape=[1])
+params_x = init_network_params(layer_sizes, random.PRNGKey(0))
+params_y = init_network_params(layer_sizes, random.PRNGKey(0))
 
 """
 Initialising optimiser for weights/biases.
@@ -295,8 +255,11 @@ Optimiser:
     opt_state (list[DeviceArray[float]]): Initialised optimised weights and biases state.
 """
 
-opt_init, opt_update, get_params = optimizers.adam(5e-4)
-opt_state = opt_init(params)
+opt_init_x, opt_update_x, get_params_x = optimizers.adam(1e-3)
+opt_state_x = opt_init_x(params_x)
+
+opt_init_y, opt_update_y, get_params_y = optimizers.adam(1e-3)
+opt_state_y = opt_init_y(params_y)
 
 # lists for boundary and residual loss values during training.
 lb_list = []
@@ -310,10 +273,11 @@ pbar = trange(nIter)
 
 start = time.time()
 for it in pbar:
-    opt_state = step(it, opt_state, x, y, bound, bfilter)
+    opt_state_x, opt_state_y = step(it, opt_state_x, opt_state_y, x, y, bound, bfilter)
     if it % 1 == 0:
-        params = get_params(opt_state)
-        loss_full, losses = loss(params, x, y, bound, bfilter)
+        params_x = get_params_x(opt_state_x)
+        params_y = get_params_y(opt_state_y)
+        loss_full, losses = loss(params_x, params_y, x, y, bound, bfilter)
         l_b = int(losses[1])
         l_f = int(losses[0])
 
@@ -324,10 +288,7 @@ for it in pbar:
 end = time.time()
 print(f'Runtime: {((end-start)/nIter*1000):.2f} ms/iter.')
 
-u_pred = net_bigu(params, x, y)
-
-# print("lb",lb_list)
-# print('lf', lf_list)
+u_pred = net_bigu(params_x, params_y, x, y)
 
 #######################################################
 ###                     PLOTTING                    ###
