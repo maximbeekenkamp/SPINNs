@@ -202,10 +202,11 @@ def loss(params, X, Y, bound, bfilter):
     Returns:
         (Tracer of) DeviceArray: Residual loss.
     """
+    u = vmap(vmap(net_u, in_axes=(None,None,0)), in_axes=(None, 0, None))(params, X, Y)
     laplace = net_bigu(params, X, Y)
     fxy = vmap(vmap(funxy, in_axes=(None,0)), in_axes=(0, None))(X, Y)
-    res = laplace+ fxy
-    lossb = loss_b(laplace, bound, bfilter)
+    res = laplace - fxy
+    lossb = loss_b(u, bound, bfilter)
     lossf = jnp.mean((res.flatten())**2)
     loss = jnp.sum(lossf + lossb)
     return (loss, (lossf, lossb))
@@ -275,7 +276,7 @@ Defined hyperparameters:
     nIter (int): Number of epochs / iterations.
 """
 nu = 10 ** (-3)
-layer_sizes = [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
+layer_sizes = [2, 20, 20, 20, 1]
 nIter = 20000 + 1
 
 """
@@ -324,7 +325,7 @@ for it in pbar:
 end = time.time()
 print(f'Runtime: {((end-start)/nIter*1000):.2f} ms/iter.')
 
-u_pred = net_bigu(params, x, y)
+u_pred = vmap(vmap(net_u, in_axes=(None,None,0)), in_axes=(None, 0, None))(params, x, y)
 
 # print("lb",lb_list)
 # print('lf', lf_list)

@@ -83,9 +83,6 @@ def predict(params, X):
     final_w, final_b = params[-1]
     logits = jnp.dot(activations, final_w) + final_b
     return logits
-#does this sum work if it is outputting multiple things
-#should each input get r outputs then the first outputs for each x input will get 
-#tensor producted with the first outputs for each y input and so on then sum r tensor products?
 
 
 @jit
@@ -104,15 +101,11 @@ def net_u(params, X):
     return predict(params, x_array)
 
 
-def hvp_fwdfwd(f, primals, tangents, return_primals=False):
+def hvp_fwdfwd(f, primals, tangents):
     g = lambda primals: jvp(f, (primals,), tangents)[1]
     primals_out, tangents_out = jvp(g, primals, tangents)
-    if return_primals:
-        return primals_out, tangents_out
-    else:
-        return tangents_out
+    return tangents_out
 
-#take gradients before merging
 @jit
 def net_bigu(x_params, y_params, X, Y):
     u_x = vmap(net_u, (None, 0))(x_params, X)
@@ -137,8 +130,7 @@ def funxy(X, Y):
     Returns:
         (Tracer of) DeviceArray: Elementwise exponent of X.
     """
-    return (4*10**6 * X**2 + -4*10**6 * X + 4*10**6 * Y**2 - 4*10**6 * Y + 1.996*10**6) * jnp.exp(-1000*((X**2 - X + Y**2 - Y + 0.5)))
-#this might be wrong :(
+    return (-4*10**6 * X**2 + 4*10**6 * X - 4*10**6 * Y**2 + 4*10**6 * Y - 1.996*10**6) * jnp.exp(-1000*((X - 0.5)**2 + (Y - 0.5)**2))
 
 @jit
 def finalfunc(X,Y):
@@ -158,12 +150,13 @@ def loss(x_params, y_params, X, Y, bound, bfilter):
     Returns:
         (Tracer of) DeviceArray: Residual loss.
     """
+    u = net_bigu(x_params, y_params, X, Y)
     u_laplace = net_laplace(x_params, y_params, X, Y)
     fxy = vmap(vmap(funxy, in_axes=(None,0)), in_axes=(0, None))(X, Y)
     res = u_laplace - fxy
-    lossb = loss_b(u_laplace, bound, bfilter)
+    lossb = loss_b(u, bound, bfilter)
     lossf = jnp.mean((res.flatten())**2)
-    loss = jnp.sum(lossf + 2*lossb)
+    loss = jnp.sum(lossf + lossb)
     return (loss, (lossf, lossb))
 
 
@@ -255,10 +248,10 @@ Optimiser:
     opt_state (list[DeviceArray[float]]): Initialised optimised weights and biases state.
 """
 
-opt_init_x, opt_update_x, get_params_x = optimizers.adam(1e-3)
+opt_init_x, opt_update_x, get_params_x = optimizers.adam(5e-4)
 opt_state_x = opt_init_x(params_x)
 
-opt_init_y, opt_update_y, get_params_y = optimizers.adam(1e-3)
+opt_init_y, opt_update_y, get_params_y = optimizers.adam(5e-4)
 opt_state_y = opt_init_y(params_y)
 
 # lists for boundary and residual loss values during training.
