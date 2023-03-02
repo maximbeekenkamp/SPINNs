@@ -208,7 +208,8 @@ def loss(params, X, Y, lam, bound, bfilter, ref):
     lossb = loss_b(u, bound, bfilter)
     lossf = jnp.mean((res.flatten())**2)
     loss = jnp.sum(lossf + lam * lossb)
-    return (loss, (lossf, lossb))
+    l2 = jnp.linalg.norm(u - ref) / jnp.linalg.norm(ref)
+    return (loss, (lossf, lossb, l2))
 
 
 @jit
@@ -312,8 +313,8 @@ Weights and Biases:
     params (list[DeviceArray[float]]): Initialised weights and biases.
 """
 
-params = init_network_params(layer_sizes, random.PRNGKey(0))
-lam = random.uniform(random.PRNGKey(0), shape=[1])
+params = init_network_params(layer_sizes, random.PRNGKey(55555))
+lam = random.uniform(random.PRNGKey(55555), shape=[1])
 
 """
 Initialising optimiser for weights/biases.

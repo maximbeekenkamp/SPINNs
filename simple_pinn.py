@@ -286,8 +286,7 @@ Weights and Biases:
     params (list[DeviceArray[float]]): Initialised weights and biases.
 """
 
-params = init_network_params(layer_sizes, random.PRNGKey(0))
-lam = random.uniform(random.PRNGKey(0), shape=[1])
+params = init_network_params(layer_sizes, random.PRNGKey(55555))
 
 """
 Initialising optimiser for weights/biases.
