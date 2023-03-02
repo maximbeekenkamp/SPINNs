@@ -11,8 +11,8 @@ All the algorithms were implemented with $100^2$ collocation points and an archi
 
 |Algorithm|Total Loss|L2 error|Time [ms/iter]|
 |:-:|:-|:-|:-|
-|Simple PINN|$0.71 \pm 0.33$|$ 14.43 \pm 0.43$|$26.30 \pm 0.083$|
-|SA-PINN|$0.64 \pm 0.19$|$ 14.22 \pm 0.21$|$28.09 \pm 0.063$|
+|Simple PINN|$0.71 \pm 0.33$|$14.43 \pm 0.43$|$26.30 \pm 0.083$|
+|SA-PINN|$0.64 \pm 0.19$|$14.22 \pm 0.21$|$28.09 \pm 0.063$|
 |S-PINN|$0.059 \pm 0.015$|$0.0099 \pm 0.0065$|$0.93 \pm 0.024$|
 
 ## Motivating Literature and Sources
