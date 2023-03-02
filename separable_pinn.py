@@ -227,9 +227,8 @@ Defined hyperparameters:
     layer_sizes (list[int]): Network architecture.
     nIter (int): Number of epochs / iterations.
 """
-r = 20
-layer_sizes = [1, 20, 20, 20, r]
-nIter = 20000 + 1
+layer_sizes = [1, 50, 50, 50, 1]
+nIter = 10000 + 1
 
 """
 Initialising weights, biases.
@@ -271,8 +270,8 @@ for it in pbar:
         params_x = get_params_x(opt_state_x)
         params_y = get_params_y(opt_state_y)
         loss_full, losses = loss(params_x, params_y, x, y, bound, bfilter)
-        l_b = int(losses[1])
-        l_f = int(losses[0])
+        l_b = losses[1]
+        l_f = losses[0]
 
         pbar.set_postfix({"Loss": (loss_full, losses)})
         lb_list.append(l_b)
