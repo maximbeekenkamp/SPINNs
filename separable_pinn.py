@@ -138,7 +138,7 @@ def finalfunc(X,Y):
 
 
 @jit
-def loss(x_params, y_params, X, Y, bound, bfilter):
+def loss(x_params, y_params, X, Y, bound, bfilter, ref):
     """
     Calculates our residual loss.
 
@@ -157,7 +157,8 @@ def loss(x_params, y_params, X, Y, bound, bfilter):
     lossb = loss_b(u, bound, bfilter)
     lossf = jnp.mean((res.flatten())**2)
     loss = jnp.sum(lossf + lossb)
-    return (loss, (lossf, lossb))
+    l2 = jnp.linalg.norm(u - ref) / jnp.linalg.norm(ref)
+    return (loss, (lossf, lossb, l2))
 
 
 @jit
@@ -175,7 +176,7 @@ def loss_b(values, bound, bfilter):
     return jnp.sum((values * bfilter - bound).flatten()**2)/(2*len(values[0]) + 2*len(values) - 4)
 
 @jit
-def step(istep, opt_state_x, opt_state_y, X, Y, bound, bfilter):
+def step(istep, opt_state_x, opt_state_y, X, Y, bound, bfilter, ref):
     """
     Training step that computes gradients for network weights and applies the Adam
     optimizer to the network.
@@ -190,9 +191,9 @@ def step(istep, opt_state_x, opt_state_y, X, Y, bound, bfilter):
     """
     param_x = get_params_x(opt_state_x)
     param_y = get_params_y(opt_state_y)
-    g_x = grad(loss, argnums=0, has_aux=True)(param_x, param_y, X, Y, bound, bfilter)
+    g_x = grad(loss, argnums=0, has_aux=True)(param_x, param_y, X, Y, bound, bfilter, ref)
     g_x = g_x[0]
-    g_y = grad(loss, argnums=1, has_aux=True)(param_x, param_y, X, Y, bound, bfilter)
+    g_y = grad(loss, argnums=1, has_aux=True)(param_x, param_y, X, Y, bound, bfilter, ref)
     g_y = g_y[0]
     return opt_update_x(istep, g_x, opt_state_x), opt_update_y(istep, g_y, opt_state_y)
 
@@ -256,26 +257,30 @@ opt_state_y = opt_init_y(params_y)
 # lists for boundary and residual loss values during training.
 lb_list = []
 lf_list = []
+l2_list = []
 
 #######################################################
 ###                  MODEL TRAINING                 ###
 #######################################################
 bound, bfilter = setup_boundry(x,y)
+ref = vmap(vmap(finalfunc, in_axes=(None,0)), in_axes=(0, None))(x, y)
 pbar = trange(nIter)
 
 start = time.time()
 for it in pbar:
-    opt_state_x, opt_state_y = step(it, opt_state_x, opt_state_y, x, y, bound, bfilter)
+    opt_state_x, opt_state_y = step(it, opt_state_x, opt_state_y, x, y, bound, bfilter, ref)
     if it % 1 == 0:
         params_x = get_params_x(opt_state_x)
         params_y = get_params_y(opt_state_y)
-        loss_full, losses = loss(params_x, params_y, x, y, bound, bfilter)
+        loss_full, losses = loss(params_x, params_y, x, y, bound, bfilter, ref)
         l_b = losses[1]
         l_f = losses[0]
+        l2 = losses[2]
 
-        pbar.set_postfix({"Loss": (loss_full, losses)})
+        pbar.set_postfix({"Loss": loss_full, "L2": l2})
         lb_list.append(l_b)
         lf_list.append(l_f)
+        l2_list.append(l2)
 
 end = time.time()
 print(f'Runtime: {((end-start)/nIter*1000):.2f} ms/iter.')
@@ -285,13 +290,13 @@ u_pred = net_bigu(params_x, params_y, x, y)
 #######################################################
 ###                     PLOTTING                    ###
 #######################################################
-fig, axs = plt.subplots(1,2,figsize = (12,8))
+fig, axs = plt.subplots(1,3,figsize = (24,8))
 
 shw = axs[0].imshow(u_pred, cmap='ocean')
 axs[0].set_title("SPINN Proposed Solution")
 axs[0].set_xlabel("x")
 axs[0].set_ylabel("y")
-fig.colorbar(shw)
+fig.colorbar(shw, ax=axs[0])
 
 axs[1].plot(lb_list, label="Boundary loss")
 axs[1].plot(lf_list, label="Residue loss")
@@ -299,5 +304,11 @@ axs[1].set_xlabel("Epoch")
 axs[1].set_ylabel("Loss")
 axs[1].legend()
 axs[1].set_title("Loss vs. Epochs")
+
+axs[2].plot(l2_list, label="L2 Error")
+axs[2].set_xlabel("Epoch")
+axs[2].set_ylabel("Error")
+axs[2].legend()
+axs[2].set_title("L2 Error vs. Epochs")
 
 plt.show()
