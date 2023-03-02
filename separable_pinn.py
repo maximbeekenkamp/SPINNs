@@ -227,7 +227,7 @@ Defined hyperparameters:
     layer_sizes (list[int]): Network architecture.
     nIter (int): Number of epochs / iterations.
 """
-layer_sizes = [1, 50, 50, 50, 1]
+layer_sizes = [1, 20, 20, 20, 2]
 nIter = 10000 + 1
 
 """

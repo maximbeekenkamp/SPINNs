@@ -5,7 +5,6 @@ from jax import grad, jit, vmap
 from jax import random
 from jax.example_libraries import optimizers
 from jax.nn import tanh
-import jaxopt
 from tqdm import trange
 import matplotlib.pyplot as plt
 
@@ -182,7 +181,7 @@ def funxy(X, Y):
     Returns:
         (Tracer of) DeviceArray: Elementwise exponent of X.
     """
-    return (4*10**6 * X**2 + -4*10**6 * X + 4*10**6 * Y**2 - 4*10**6 * Y + 1.996*10**6) * jnp.exp(-1000*((X**2 - X + Y**2 - Y + 0.5)))
+    return (4*10**6 * X**2 - 4*10**6 * X + 4*10**6 * Y**2 - 4*10**6 * Y + 1.996*10**6) * jnp.exp(-1000*((X**2 - X + Y**2 - Y + 0.5)))
 
 @jit
 def finalfunc(X,Y):
@@ -202,10 +201,11 @@ def loss(params, X, Y, lam, bound, bfilter):
     Returns:
         (Tracer of) DeviceArray: Residual loss.
     """
+    u = vmap(vmap(net_u, in_axes=(None,None,0)), in_axes=(None, 0, None))(params, X, Y)
     laplace = net_bigu(params, X, Y)
     fxy = vmap(vmap(funxy, in_axes=(None,0)), in_axes=(0, None))(X, Y)
-    res = laplace+ fxy
-    lossb = loss_b(laplace, bound, bfilter)
+    res = laplace - fxy
+    lossb = loss_b(u, bound, bfilter)
     lossf = jnp.mean((res.flatten())**2)
     loss = jnp.sum(lossf + lam * lossb)
     return (loss, (lossf, lossb))
@@ -240,10 +240,10 @@ def step(istep, opt_state, X, Y, opt_state_lam, bound, bfilter):
         (Tracer of) DeviceArray: Optimised network parameters.
     """
     params = get_params(opt_state)
-    lam = get_params(opt_state_lam)
+    lam = get_params_lam(opt_state_lam)
     g = grad(loss, argnums=0, has_aux=True)(params, X, Y, lam, bound, bfilter)
     g_lam = grad(loss, argnums=3, has_aux=True)(params, X, Y, lam, bound, bfilter)
-    return opt_update(istep, g[0], opt_state), opt_update_lam(istep, g_lam[0], opt_state_lam)
+    return opt_update(istep, g[0], opt_state), opt_update_lam(istep, -g_lam[0], opt_state_lam)
 
 def setup_boundry(X,Y):
     bound = np.array([[0 for a in range(len(X))] for b in range(len(Y))])
@@ -257,30 +257,30 @@ def setup_boundry(X,Y):
         bound[len(Y)-1][x] = finalfunc(X[x], Y[len(Y)-1])
     return jnp.array(bound), jnp.array(bfilter)
 
-def loss_wrapper(params, X, Y, lam):
-    param_x, param_y = params
-    return loss(param_x, param_y, X, Y, lam) 
+# def loss_wrapper(params, X, Y, lam):
+#     param_x, param_y = params
+#     return loss(param_x, param_y, X, Y, lam) 
 
 
-def minimize_lbfgs(params, X, Y, lam):
-    """
-    Training step that computes gradients for network weights and applies the L-BFGS optimization
-    to the network.
+# def minimize_lbfgs(params, X, Y, lam):
+#     """
+#     Training step that computes gradients for network weights and applies the L-BFGS optimization
+#     to the network.
 
-    Args:
-        params (jnpArray): jnpArray containing weights and biases.
-        X (Tracer of DeviceArray): Collocation points in the domain.
-        nu (Tracer of float): Multiplicative constant.
-        l_lb (Tracer of DeviceArray): SA-Weight for the lower bound loss.
-        l_ub (Tracer of DeviceArray): SA-Weight for the upper bound loss.
-        sizes (list[int]): Network architecture.
+#     Args:
+#         params (jnpArray): jnpArray containing weights and biases.
+#         X (Tracer of DeviceArray): Collocation points in the domain.
+#         nu (Tracer of float): Multiplicative constant.
+#         l_lb (Tracer of DeviceArray): SA-Weight for the lower bound loss.
+#         l_ub (Tracer of DeviceArray): SA-Weight for the upper bound loss.
+#         sizes (list[int]): Network architecture.
 
-    Returns:
-        (Tracer of) DeviceArray: Optimised network parameters.
-    """
-    minimizer = jaxopt.LBFGS(fun=loss_wrapper, has_aux=True)
-    opt_params = minimizer.run([params], X, Y, lam)
-    return opt_params.params
+#     Returns:
+#         (Tracer of) DeviceArray: Optimised network parameters.
+#     """
+#     minimizer = jaxopt.LBFGS(fun=loss_wrapper, has_aux=True)
+#     opt_params = minimizer.run([params], X, Y, lam)
+#     return opt_params.params
 
 
 #######################################################
@@ -302,7 +302,7 @@ Defined hyperparameters:
     nIter (int): Number of epochs / iterations.
 """
 nu = 10 ** (-3)
-layer_sizes = [2, 50, 50, 50, 1]
+layer_sizes = [2, 20, 20, 20, 1]
 nIter = 10000 + 1 
 
 """
@@ -344,12 +344,12 @@ for it in pbar:
     opt_state, opt_state_lam = step(it, opt_state, x, y, opt_state_lam, bound, bfilter)
     if it % 1 == 0:
         params = get_params(opt_state)
-        lam = get_params_lam(opt_state_lam)
+        lam = get_params_lam(opt_state_lam)[0]
         loss_full, losses = loss(params, x, y, lam, bound, bfilter)
-        l_b = int(losses[1])
-        l_f = int(losses[0])
+        l_b = losses[1]
+        l_f = losses[0]
 
-        pbar.set_postfix({"Loss": (loss_full, losses)})
+        pbar.set_postfix({"Loss": (loss_full, losses, lam)})
         lb_list.append(l_b)
         lf_list.append(l_f)
         lam_list.append(lam)
@@ -357,7 +357,7 @@ for it in pbar:
 end = time.time()
 print(f'Runtime: {((end-start)/nIter*1000):.2f} ms/iter.')
 
-u_pred = net_bigu(params, x, y)
+u_pred = vmap(vmap(net_u, in_axes=(None,None,0)), in_axes=(None, 0, None))(params, x, y)
 
 # print("lb",lb_list)
 # print('lf', lf_list)
@@ -375,6 +375,7 @@ fig.colorbar(shw)
 
 axs[1].plot(lb_list, label="Boundary loss")
 axs[1].plot(lf_list, label="Residue loss")
+axs[1].plot(lam_list, label="Lambda")
 axs[1].set_xlabel("Epoch")
 axs[1].set_ylabel("Loss")
 axs[1].legend()
