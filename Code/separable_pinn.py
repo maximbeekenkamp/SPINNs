@@ -343,7 +343,7 @@ Defined hyperparameters:
     nIter (int): Number of epochs / iterations.
 """
 layer_sizes = [1, 20, 20, 20, 2]
-nIter = 10000 + 1
+nIter = 100000 + 1
 
 """
 Initialising weights, biases.
@@ -368,6 +368,12 @@ opt_state_x = opt_init_x(params_x)
 opt_init_y, opt_update_y, get_params_y = optimizers.adam(5e-4)
 opt_state_y = opt_init_y(params_y)
 
+opt_init_x2, opt_update_x2, get_params_x2 = optimizers.adam(1e-8)
+opt_state_x2 = opt_init_x2(params_x)
+
+opt_init_y2, opt_update_y2, get_params_y2 = optimizers.adam(1e-8)
+opt_state_y2 = opt_init_y2(params_y)
+
 # lists for boundary and residual loss values during training.
 lb_list = []
 lf_list = []
@@ -382,21 +388,38 @@ pbar = trange(nIter)
 
 start = time.time()
 for it in pbar:
-    opt_state_x, opt_state_y = step(
-        it, opt_state_x, opt_state_y, x, y, bound, bfilter, ref
-    )
-    if it % 1 == 0:
-        params_x = get_params_x(opt_state_x)
-        params_y = get_params_y(opt_state_y)
-        loss_full, losses = loss(params_x, params_y, x, y, bound, bfilter, ref)
-        l_b = losses[1]
-        l_f = losses[0]
-        l2 = losses[2]
+    if it < 500:
+        opt_state_x, opt_state_y = step(
+            it, opt_state_x, opt_state_y, x, y, bound, bfilter, ref
+        )
+        if it % 1 == 0:
+            params_x = get_params_x(opt_state_x)
+            params_y = get_params_y(opt_state_y)
+            loss_full, losses = loss(params_x, params_y, x, y, bound, bfilter, ref)
+            l_b = losses[1]
+            l_f = losses[0]
+            l2 = losses[2]
 
-        pbar.set_postfix({"Loss": loss_full, "L2": l2})
-        lb_list.append(l_b)
-        lf_list.append(l_f)
-        l2_list.append(l2)
+            pbar.set_postfix({"Loss": loss_full, "L2": l2})
+            lb_list.append(l_b)
+            lf_list.append(l_f)
+            l2_list.append(l2)
+    else:
+        opt_state_x2, opt_state_y2 = step(
+            it, opt_state_x2, opt_state_y2, x, y, bound, bfilter, ref
+        )
+        if it % 1 == 0:
+            params_x2 = get_params_x2(opt_state_x2)
+            params_y2 = get_params_y2(opt_state_y2)
+            loss_full, losses = loss(params_x2, params_y2, x, y, bound, bfilter, ref)
+            l_b = losses[1]
+            l_f = losses[0]
+            l2 = losses[2]
+
+            pbar.set_postfix({"Loss": loss_full, "L2": l2})
+            lb_list.append(l_b)
+            lf_list.append(l_f)
+            l2_list.append(l2)
 
 end = time.time()
 print(f"Runtime: {((end-start)/nIter*1000):.2f} ms/iter.")
@@ -417,14 +440,31 @@ fig.colorbar(shw, ax=axs[0])
 axs[1].plot(lb_list, label="Boundary loss")
 axs[1].plot(lf_list, label="Residue loss")
 axs[1].set_xlabel("Epoch")
+axs[1].set_yscale('log')
 axs[1].set_ylabel("Loss")
 axs[1].legend()
 axs[1].set_title("Loss vs. Epochs")
 
 axs[2].plot(l2_list, label="L2 Error")
 axs[2].set_xlabel("Epoch")
+axs[2].set_yscale('log')
 axs[2].set_ylabel("Error")
 axs[2].legend()
 axs[2].set_title("L2 Error vs. Epochs")
+
+# axs[1].plot(lf_list, label="Residue loss")
+# axs[1].set_xlabel("Epoch")
+# axs[1].set_yscale('log')
+# axs[1].set_ylabel("Loss")
+# axs[1].legend()
+# axs[1].set_title("Loss vs. Epochs")
+
+# axs[1].plot(lb_list, label="Boundary loss")
+# axs[1].set_xlabel("Epoch")
+# axs[1].set_yscale('log')
+# axs[1].set_ylabel("Loss")
+# axs[1].legend()
+# axs[1].set_title("Loss vs. Epochs")
+
 
 plt.show()
